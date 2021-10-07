@@ -2,6 +2,7 @@
 #   
 # This source code is licensed under the MIT license found in the 
 # LICENSE file in the root directory of this source tree.
+'''8-bit optimizer modules.'''
 from .adam import Adam, Adam8bit, Adam32bit
 from .sgd import SGD, SGD8bit, SGD32bit
 from .lars import LARS, LARS8bit, LARS32bit, PytorchLARS
