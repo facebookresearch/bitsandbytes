@@ -1,5 +1,5 @@
 sphinx==3.2.1
-sphinx-rtd-theme=1.0.0
+sphinx-rtd-theme==1.0.0
 myst_parser
 pytest
 torch==1.9.1+cpu
