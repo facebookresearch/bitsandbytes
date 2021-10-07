@@ -6,13 +6,8 @@
 Welcome to bitsandbytes's documentation!
 ========================================
 
-- test
-- list
-## heading 
-
 .. automodule:: bitsandbytes.functional
    :members:
-  
 
 .. toctree::
    :maxdepth: 2
