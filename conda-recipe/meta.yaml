@@ -1,0 +1,47 @@
+{% set name = "bitsandbytes_cuda111" %}
+{% set version = "0.26.0" %}
+
+package:
+  name: "{{ name|lower }}"
+  version: "{{ version }}"
+
+source:
+  url: "https://files.pythonhosted.org/packages/3c/54/74f9756c4f05d9720bfa0386de989e3649669f2a6558020dadcaf643da5a/bitsandbytes-cuda111-0.26.0.tar.gz"
+  sha256: 01a9628eee5d6858b666511114800ce2c5f9dc1252652946136db2fdde766762
+
+build:
+  number: 0
+  script_env:
+    - CUDA_VERSION=111
+  script: "{{ PYTHON }} -m pip install . -vv"
+
+requirements:
+  host:
+    - pip
+    - python
+  run:
+    - python
+    - pytorch
+    - cudatoolkit=11.1
+
+test:
+  imports:
+    - bitsandbytes
+    - bitsandbytes.nn
+    - bitsandbytes.optim
+  requires:
+    - pytest
+
+about:
+  home: "http://packages.python.org/bitsandbytes" 
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+  summary: "8-bit optimizers and quantization routines."
+  doc_url: https://github.com/facebookresearch/bitsandbytes/edit/main/README.md
+  dev_url: https://github.com/facebookresearch/bitsandbytes
+
+extra:
+  recipe-maintainers:
+    - TitusCornelius
+    - TimDettmers
