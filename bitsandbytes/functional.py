@@ -141,7 +141,7 @@ def estimate_quantiles(A: Tensor, out: Tensor=None, offset: float=1/512) -> Tens
         raise NotImplementError(f'Not supported data type {A.dtype}')
     return out
 
-def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=None, out: Tensor=None) -> Tensor:
+def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=None, out: Tensor=None) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
     '''
     Quantize tensor A in blocks of size 4096 values.
 
