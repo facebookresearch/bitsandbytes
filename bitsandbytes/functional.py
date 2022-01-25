@@ -138,10 +138,10 @@ def estimate_quantiles(A: Tensor, out: Tensor=None, offset: float=1/512) -> Tens
     elif A.dtype == torch.float16:
         lib.cestimate_quantiles_fp16(get_ptr(A), get_ptr(out), ct.c_float(offset), ct.c_int(A.numel()))
     else:
-        raise NotImplementError(f'Not supported data type {A.dtype}')
+        raise ValueError(f'Unsupported data type {A.dtype}')
     return out
 
-def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=None, out: Tensor=None) -> Tensor:
+def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=None, out: Tensor=None) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
     '''
     Quantize tensor A in blocks of size 4096 values.
 
@@ -205,7 +205,10 @@ def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=N
     else:
         # cpu
         assert rand is None
-        lib.cquantize_blockwise_cpu_fp32(get_ptr(code), get_ptr(A), get_ptr(absmax), get_ptr(out), ct.c_int(A.numel()))
+        if A.dtype == torch.float32:
+            lib.cquantize_blockwise_cpu_fp32(get_ptr(code), get_ptr(A), get_ptr(absmax), get_ptr(out), ct.c_int(A.numel()))
+        else:
+            raise ValueError(f'Blockwise quantization of CPU tensors only supports 32-bit floats, but got {A.dtype}')
 
     return out, (absmax, code)
 
@@ -225,9 +228,9 @@ def dequantize_blockwise(A: Tensor, quant_state: Tuple[Tensor, Tensor]=None,
     quant_state : tuple(torch.Tensor, torch.Tensor)
         Tuple of code and absmax values. 
     absmax : torch.Tensor
-        The absmax values.
+        The absmax values as a float32 tensor.
     code : torch.Tensor
-        The quantization map.
+        The quantization map as a float32 tensor.
     out : torch.Tensor
         Dequantized output tensor (default: float32)
 
@@ -246,6 +249,10 @@ def dequantize_blockwise(A: Tensor, quant_state: Tuple[Tensor, Tensor]=None,
     if out is None: out = torch.zeros_like(A, dtype=torch.float32)
     if quant_state is None: quant_state = (absmax, code)
 
+    if quant_state[0].dtype != torch.float32:
+        raise ValueError(f'absmax should be a 32-bit float, but got {quant_state[0].dtype}')
+    if quant_state[1].dtype != torch.float32:
+        raise ValueError(f'code should be a 32-bit float, but got {quant_state[1].dtype}')
     if blocksize not in [2048, 4096]:
         raise ValueError(f'The blockwise of {blocksize} is not supported. Supported values: [2048 4096]')
 
@@ -257,7 +264,10 @@ def dequantize_blockwise(A: Tensor, quant_state: Tuple[Tensor, Tensor]=None,
         else:
             raise ValueError(f'Blockwise quantization only supports 16/32-bit floats, but got {A.dtype}')
     else:
-        lib.cdequantize_blockwise_cpu_fp32(get_ptr(quant_state[1]), get_ptr(A), get_ptr(quant_state[0]), get_ptr(out), ct.c_int(A.numel()))
+        if out.dtype == torch.float32:
+            lib.cdequantize_blockwise_cpu_fp32(get_ptr(quant_state[1]), get_ptr(A), get_ptr(quant_state[0]), get_ptr(out), ct.c_int(A.numel()))
+        else:
+            raise ValueError(f'Blockwise dequantization of CPU tensors only supports outputting 32-bit floats, but got {out.dtype}')
 
 
     return out
