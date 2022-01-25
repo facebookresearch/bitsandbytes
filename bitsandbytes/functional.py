@@ -138,7 +138,7 @@ def estimate_quantiles(A: Tensor, out: Tensor=None, offset: float=1/512) -> Tens
     elif A.dtype == torch.float16:
         lib.cestimate_quantiles_fp16(get_ptr(A), get_ptr(out), ct.c_float(offset), ct.c_int(A.numel()))
     else:
-        raise NotImplementError(f'Not supported data type {A.dtype}')
+        raise ValueError(f'Unsupported data type {A.dtype}')
     return out
 
 def quantize_blockwise(A: Tensor, code: Tensor=None, absmax: Tensor=None, rand=None, out: Tensor=None) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
