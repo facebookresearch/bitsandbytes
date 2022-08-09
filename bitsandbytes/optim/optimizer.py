@@ -26,6 +26,7 @@ class GlobalOptimManager(object):
         self.index2config = {}
         self.optimizer = None
         self.uses_config_override = False
+        self.module_weight_config_triple = []
 
     @classmethod
     def get_instance(cls):
@@ -77,12 +78,16 @@ class GlobalOptimManager(object):
                 if id(p) in self.pid2config:self.pid2config[id(p)].update(key_value_dict)
                 else: self.pid2config[id(p)] = key_value_dict
 
+    def register_module_override(self, module, param_name, config):
+        self.module_weight_config_triple.append((module, param_name, config))
+
+
 
 class Optimizer8bit(torch.optim.Optimizer):
 
     def __init__(self, params, defaults, optim_bits=32):
         super(Optimizer8bit, self).__init__(params, defaults)
-        self.checked_if_on_gpu = False
+        self.initialized = False
         self.name2qmap = {}
 
         self.mng = GlobalOptimManager.get_instance()
@@ -172,7 +177,6 @@ class Optimizer8bit(torch.optim.Optimizer):
         self.__setstate__({'state': state, 'param_groups': param_groups})
 
     def to_gpu(self):
-        self.checked_if_on_gpu = True
         for gindex, group in enumerate(self.param_groups):
             for pindex, p in enumerate(group['params']):
                 if p in self.state:
@@ -180,6 +184,23 @@ class Optimizer8bit(torch.optim.Optimizer):
                     for k, v in values.items():
                         if isinstance(v, torch.Tensor):
                             self.state[p][k] = v.to(p.device)
+
+    def check_overrides(self):
+        for module, attr, config in self.mng.module_weight_config_triple:
+            pmodule = getattr(module, attr)
+            assert pmodule is not None
+            assert isinstance(pmodule, torch.Tensor) or isinstance(pmodule, torch.Parameter)
+            found = False
+            for gindex, group in enumerate(self.param_groups):
+                if found: break
+                for pindex, p in enumerate(group['params']):
+                    if found: break
+                    if id(p) == id(pmodule):
+                        # found the matching parameter
+                        # init override
+                        self.mng.pid2config[id(p)] = config
+                        self.mng.index2config[(gindex, pindex)] = self.mng.pid2config[id(p)]
+                        found = True
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -196,7 +217,11 @@ class Optimizer8bit(torch.optim.Optimizer):
 
         overflows = []
 
-        if not self.checked_if_on_gpu: self.to_gpu() # needed for fairseq pure fp16 training
+        if not self.initialized:
+            self.check_overrides()
+            self.to_gpu() # needed for fairseq pure fp16 training
+            self.initialized = True
+
         for gindex, group in enumerate(self.param_groups):
             for pindex, p in enumerate(group['params']):
                 if p.grad is None:
@@ -220,6 +245,7 @@ class Optimizer8bit(torch.optim.Optimizer):
         config['percentile_clipping'] = self.args.percentile_clipping
         config['block_wise'] = self.args.block_wise
         config['max_unorm'] = self.args.max_unorm
+        config['skip_zeros'] = self.args.skip_zeros
 
         if (gindex, pindex) in self.mng.index2config:
             config.update(self.mng.index2config[(gindex, pindex)])
@@ -234,14 +260,16 @@ class Optimizer8bit(torch.optim.Optimizer):
 class Optimizer2State(Optimizer8bit):
     def __init__(self, optimizer_name, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
             weight_decay=0.0, optim_bits=32, args=None,
-            min_8bit_size=4096, percentile_clipping=100, block_wise=True, max_unorm=0.0):
+            min_8bit_size=4096, percentile_clipping=100, block_wise=True, max_unorm=0.0,
+            skip_zeros=False):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
             raise ValueError("Invalid epsilon value: {}".format(eps))
         if isinstance(betas, str):
-            betas = eval(betas)
-            print(betas, 'parsed')
+            # format: '(beta1, beta2)'
+            betas = betas.replace('(', '').replace(')', '').strip().split(',')
+            betas = [float(b) for b in betas]
         for i in range(len(betas)):
             if not 0.0 <= betas[i] < 1.0:
                 raise ValueError(f"Invalid beta parameter at index {i}: {betas[i]}")
@@ -259,6 +287,7 @@ class Optimizer2State(Optimizer8bit):
             args['percentile_clipping'] = percentile_clipping
             args['block_wise'] = block_wise
             args['max_unorm'] = max_unorm
+            args['skip_zeros'] = skip_zeros
 
             self.args = MockArgs(args)
         else:
@@ -333,7 +362,7 @@ class Optimizer2State(Optimizer8bit):
         if state['state1'].dtype == torch.float:
             F.optimizer_update_32bit(self.optimizer_name, grad, p, state['state1'], config['betas'][0], config['eps'], step, config['lr'],
                     state['state2'], config['betas'][1], config['weight_decay'], gnorm_scale,
-                    state['unorm_vec'] if config['max_unorm'] > 0.0 else None, max_unorm=config['max_unorm'])
+                    state['unorm_vec'] if config['max_unorm'] > 0.0 else None, max_unorm=config['max_unorm'], skip_zeros=config['skip_zeros'])
 
         elif state['state1'].dtype == torch.uint8 and not config['block_wise']:
             F.optimizer_update_8bit(self.optimizer_name, grad, p, state['state1'], state['state2'], config['betas'][0], config['betas'][1],
@@ -349,13 +378,14 @@ class Optimizer2State(Optimizer8bit):
             F.optimizer_update_8bit_blockwise(self.optimizer_name, grad, p, state['state1'], state['state2'], config['betas'][0], config['betas'][1],
                           config['eps'],  step, config['lr'],
                           state['qmap1'], state['qmap2'], state['absmax1'], state['absmax2'],
-                          config['weight_decay'], gnorm_scale=gnorm_scale)
+                          config['weight_decay'], gnorm_scale=gnorm_scale, skip_zeros=config['skip_zeros'])
 
 
 class Optimizer1State(Optimizer8bit):
     def __init__(self, optimizer_name, params, lr=1e-3, betas=(0.9, 0.0), eps=1e-8,
             weight_decay=0.0, optim_bits=32, args=None,
-            min_8bit_size=4096, percentile_clipping=100, block_wise=True, max_unorm=0.0):
+            min_8bit_size=4096, percentile_clipping=100, block_wise=True, max_unorm=0.0,
+            skip_zeros=False):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -377,6 +407,7 @@ class Optimizer1State(Optimizer8bit):
             args['percentile_clipping'] = percentile_clipping
             args['block_wise'] = block_wise
             args['max_unorm'] = max_unorm
+            args['skip_zeros'] = skip_zeros
 
             self.args = MockArgs(args)
         else:
@@ -444,7 +475,8 @@ class Optimizer1State(Optimizer8bit):
         if state['state1'].dtype == torch.float:
             F.optimizer_update_32bit(self.optimizer_name, grad, p, state['state1'], config['betas'][0], config['eps'], step, config['lr'],
                     None, 0.0, config['weight_decay'], gnorm_scale,
-                    state['unorm_vec'] if config['max_unorm'] > 0.0 else None, max_unorm=config['max_unorm'])
+                    state['unorm_vec'] if config['max_unorm'] > 0.0 else None, max_unorm=config['max_unorm'],
+                    skip_zeros=config['skip_zeros'])
 
         elif state['state1'].dtype == torch.uint8 and not config['block_wise']:
             F.optimizer_update_8bit(self.optimizer_name, grad, p, state['state1'], None, config['betas'][0], config['betas'][1],
@@ -457,4 +489,4 @@ class Optimizer1State(Optimizer8bit):
             F.optimizer_update_8bit_blockwise(self.optimizer_name, grad, p, state['state1'], None, config['betas'][0], config['betas'][1],
                           config['eps'],  step, config['lr'],
                           state['qmap1'], None, state['absmax1'], None,
-                          config['weight_decay'], gnorm_scale=gnorm_scale)
+                          config['weight_decay'], gnorm_scale=gnorm_scale, skip_zeros=config['skip_zeros'])

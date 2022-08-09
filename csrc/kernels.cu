@@ -654,7 +654,7 @@ __launch_bounds__(TH, 1)
 __global__ void kOptimizer32bit2State(T* g, T* p, 
                 float* state1, float* state2, float *unorm, const float max_unorm, const float param_norm,
                 const float beta1, const float beta2, const float eps, const float weight_decay,
-                const int step, const float lr, const float gnorm_scale, const int n)
+                const int step, const float lr, const float gnorm_scale, const bool skip_zeros, const int n)
 {
 
   const int n_full = ((TH*NUM_PER_THREAD)*(n/(TH*NUM_PER_THREAD))) + (n % (TH*NUM_PER_THREAD) == 0 ? 0 : (TH*NUM_PER_THREAD));
@@ -715,9 +715,15 @@ __global__ void kOptimizer32bit2State(T* g, T* p,
           switch(OPTIMIZER)
           {
               case ADAM: 
-                  s1_vals[j] = s1_vals[j]*beta1 + ((1.0f -beta1)*((float)g_vals[j]));
-                  s2_vals[j] = s2_vals[j]*beta2 + ((1.0f -beta2)*(((float)g_vals[j])*((float)g_vals[j])));
-                  p_vals[j] = ((float)p_vals[j]) + (update_scale*step_size*(s1_vals[j]/(sqrtf(s2_vals[j])+(eps*correction2))));
+									if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+									{
+										s1_vals[j] = s1_vals[j]*beta1 + ((1.0f -beta1)*((float)g_vals[j]));
+										s2_vals[j] = s2_vals[j]*beta2 + ((1.0f -beta2)*(((float)g_vals[j])*((float)g_vals[j])));
+										p_vals[j] = ((float)p_vals[j]) + (update_scale*step_size*(s1_vals[j]/(sqrtf(s2_vals[j])+(eps*correction2))));
+
+                    if(weight_decay > 0.0f)
+                        p_vals[j] = ((float)p_vals[j])*(1.0f-(lr*weight_decay));
+									}
                   break;
           }
       }
@@ -787,6 +793,11 @@ __global__ void kPreconditionOptimizer32bit1State(T* g, T* p,
                   s1_vals[j] = __fdividef((float)g_vals[j],sqrtf(s1_vals[j])+eps); // update value
                   s1_vals[j] = s1_vals[j]*s1_vals[j]; // update norm
                   break;
+              case ADAGRAD: 
+                  s1_vals[j] = s1_vals[j] + ((float)g_vals[j])*((float)g_vals[j]); // state update
+                  s1_vals[j] = __fdividef((float)g_vals[j],sqrtf(s1_vals[j])+eps); // update value
+                  s1_vals[j] = s1_vals[j]*s1_vals[j]; // update norm
+                  break;
           }
       }
 
@@ -809,7 +820,7 @@ __launch_bounds__(TH, 1)
 __global__ void kOptimizer32bit1State(T *g, T *p, 
                 float *state1, float *unorm, const float max_unorm, const float param_norm,
                 const float beta1, const float eps, const float weight_decay,
-                const int step, const float lr, const float gnorm_scale, const int n)
+                const int step, const float lr, const float gnorm_scale, const bool skip_zeros, const int n)
 {
 
   const int n_full = ((TH*NUM_PER_THREAD)*(n/(TH*NUM_PER_THREAD))) + (n % (TH*NUM_PER_THREAD) == 0 ? 0 : (TH*NUM_PER_THREAD));
@@ -865,21 +876,28 @@ __global__ void kOptimizer32bit1State(T *g, T *p,
       # pragma unroll 4
       for(unsigned int j = 0; j < NUM_PER_THREAD; j++)
       {
-          switch(OPTIMIZER)
-          {
-              case MOMENTUM: 
-                  if(step == 1)
-                    s1_vals[j] = (float)g_vals[j];
-                  else
-                    s1_vals[j] = s1_vals[j]*beta1 + ((float)g_vals[j]);
+					if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+					{
+						switch(OPTIMIZER)
+						{
+								case MOMENTUM: 
+										if(step == 1)
+											s1_vals[j] = (float)g_vals[j];
+										else
+											s1_vals[j] = s1_vals[j]*beta1 + ((float)g_vals[j]);
 
-                  p_vals[j] = ((float)p_vals[j]) + update_scale*(-lr*(s1_vals[j]));
-                  break;
-              case RMSPROP: 
-                  s1_vals[j] = s1_vals[j]*beta1 + ((1.0f-beta1)*((float)g_vals[j])*((float)g_vals[j]));
-                  p_vals[j] = ((float)p_vals[j]) - update_scale*(lr*__fdividef((float)g_vals[j],sqrtf((float)s1_vals[j])+eps));
-                  break;
-          }
+										p_vals[j] = ((float)p_vals[j]) + update_scale*(-lr*(s1_vals[j]));
+										break;
+								case RMSPROP: 
+										s1_vals[j] = s1_vals[j]*beta1 + ((1.0f-beta1)*((float)g_vals[j])*((float)g_vals[j]));
+										p_vals[j] = ((float)p_vals[j]) - update_scale*(lr*__fdividef((float)g_vals[j],sqrtf((float)s1_vals[j])+eps));
+										break;
+								case ADAGRAD: 
+										s1_vals[j] = s1_vals[j] + ((float)g_vals[j])*((float)g_vals[j]);
+										p_vals[j] = ((float)p_vals[j]) - lr*__fdividef((float)g_vals[j],sqrtf((float)s1_vals[j])+eps);
+										break;
+						}
+					}
       }
 
       __syncthreads();
@@ -1383,7 +1401,7 @@ kOptimizerStatic8bit2StateBlockwise(T* p, T* __restrict__ const g, unsigned char
                 float* __restrict__ const quantiles1, float* __restrict__ const quantiles2,
                 float* absmax1, float* absmax2, 
                 float weight_decay,
-                const float gnorm_scale, const int n)
+                const float gnorm_scale, const bool skip_zeros, const int n)
 {
 
     //const int n_full = n + (n%BLOCK_SIZE);
@@ -1469,11 +1487,14 @@ kOptimizerStatic8bit2StateBlockwise(T* p, T* __restrict__ const g, unsigned char
         {
             g_val = float(g_vals[j]);
             g_val *= gnorm_scale;
-            s1_vals[j] = smem_quantiles1[lane_id][c1s[j]]*absmax1[i/BLOCK_SIZE];
-            s1_vals[j] = (s1_vals[j]*beta1) + (((1.0f-beta1)*g_val));
+						if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+						{
+							s1_vals[j] = smem_quantiles1[lane_id][c1s[j]]*absmax1[i/BLOCK_SIZE];
+							s1_vals[j] = (s1_vals[j]*beta1) + (((1.0f-beta1)*g_val));
 
-            s2_vals[j] = smem_quantiles2[lane_id][c2s[j]]*absmax2[i/BLOCK_SIZE];
-            s2_vals[j] = (s2_vals[j]*beta2) + (((1.0f-beta2)*g_val*g_val));
+							s2_vals[j] = smem_quantiles2[lane_id][c2s[j]]*absmax2[i/BLOCK_SIZE];
+							s2_vals[j] = (s2_vals[j]*beta2) + (((1.0f-beta2)*g_val*g_val));
+						}
 
             new_local_abs_max1 = fmaxf(new_local_abs_max1, fabsf(s1_vals[j]));
             new_local_abs_max2 = fmaxf(new_local_abs_max2, fabsf(s2_vals[j]));
@@ -1509,9 +1530,12 @@ kOptimizerStatic8bit2StateBlockwise(T* p, T* __restrict__ const g, unsigned char
         # pragma unroll N_PER_TH
         for(unsigned int j = 0; j < N_PER_TH; j++)
         {
-            g_vals[j] = (T)(((float)g_vals[j]) + ((step_size*(__fdividef(s1_vals[j],(sqrtf(s2_vals[j])+(correction2*eps)))))));
-            if(weight_decay > 0.0f)
-                g_vals[j] = ((float)g_vals[j])*(1.0f-(lr*weight_decay));
+						if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+						{
+							g_vals[j] = (T)(((float)g_vals[j]) + ((step_size*(__fdividef(s1_vals[j],(sqrtf(s2_vals[j])+(correction2*eps)))))));
+							if(weight_decay > 0.0f)
+									g_vals[j] = ((float)g_vals[j])*(1.0f-(lr*weight_decay));
+						}
         }
 
         //  store: 0.85/1.44 -> 2.48/1.57
@@ -1555,7 +1579,7 @@ kOptimizerStatic8bit1StateBlockwise(T* p, T* __restrict__ const g, unsigned char
                 float* __restrict__ const quantiles1,
                 float* absmax1,
                 float weight_decay,
-                const float gnorm_scale, const int n)
+                const float gnorm_scale, const bool skip_zeros, const int n)
 {
 
     //const int n_full = n + (n%BLOCK_SIZE);
@@ -1623,23 +1647,29 @@ kOptimizerStatic8bit1StateBlockwise(T* p, T* __restrict__ const g, unsigned char
         {
             g_val = float(g_vals[j]);
             g_val *= gnorm_scale;
-            if(weight_decay > 0.0f)
-              g_val += ((float)p_vals[j])*weight_decay;
+						if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+						{
+							if(weight_decay > 0.0f)
+								g_val += ((float)p_vals[j])*weight_decay;
 
-						s1_vals[j] = smem_quantiles1[lane_id][c1s[j]]*absmax1[i/BLOCK_SIZE];
+							s1_vals[j] = smem_quantiles1[lane_id][c1s[j]]*absmax1[i/BLOCK_SIZE];
 
-            switch(OPTIMIZER)
-            {
-                case MOMENTUM: 
-                  if(step == 1)
-                    s1_vals[j] = g_val;
-                  else
-										s1_vals[j] = (s1_vals[j]*beta1) + g_val;
-                  break;
-								case RMSPROP: 
-									s1_vals[j] = s1_vals[j]*beta1 + ((1.0f-beta1)*(g_val*g_val));
-									break;
-            }
+							switch(OPTIMIZER)
+							{
+									case MOMENTUM: 
+										if(step == 1)
+											s1_vals[j] = g_val;
+										else
+											s1_vals[j] = (s1_vals[j]*beta1) + g_val;
+										break;
+									case RMSPROP: 
+										s1_vals[j] = s1_vals[j]*beta1 + ((1.0f-beta1)*(g_val*g_val));
+										break;
+									case ADAGRAD: 
+										s1_vals[j] = s1_vals[j] + (g_val*g_val);
+										break;
+							}
+						}
 
             new_local_abs_max1 = fmaxf(new_local_abs_max1, fabsf(s1_vals[j]));
         }
@@ -1662,16 +1692,23 @@ kOptimizerStatic8bit1StateBlockwise(T* p, T* __restrict__ const g, unsigned char
         # pragma unroll N_PER_TH
         for(unsigned int j = 0; j < N_PER_TH; j++)
 				{
-            switch(OPTIMIZER)
-            {
-                case MOMENTUM: 
-									p_vals[j] = ((float)p_vals[j]) - lr*(s1_vals[j]);
-									break;
-								case RMSPROP: 
-									g_val = g_vals[j];
-									p_vals[j] = ((float)p_vals[j]) - lr*(__fdividef(g_val, sqrtf(s1_vals[j])+eps));
-									break;
-            }
+						if(!skip_zeros || (skip_zeros && ((float)g_vals[j] != 0.0f)))
+						{
+							switch(OPTIMIZER)
+							{
+									case MOMENTUM: 
+										p_vals[j] = ((float)p_vals[j]) - lr*(s1_vals[j]);
+										break;
+									case RMSPROP: 
+										g_val = g_vals[j];
+										p_vals[j] = ((float)p_vals[j]) - lr*(__fdividef(g_val, sqrtf(s1_vals[j])+eps));
+										break;
+									case ADAGRAD: 
+										g_val = g_vals[j];
+										p_vals[j] = ((float)p_vals[j]) - lr*(__fdividef(g_val, sqrtf(s1_vals[j])+eps));
+										break;
+							}
+						}
 				}
 
         //  store: 0.85/1.44 -> 2.48/1.57
@@ -1720,15 +1757,19 @@ MAKE_PreconditionOptimizer32bit1State(MOMENTUM, half)
 MAKE_PreconditionOptimizer32bit1State(MOMENTUM, float)
 MAKE_PreconditionOptimizer32bit1State(RMSPROP, half)
 MAKE_PreconditionOptimizer32bit1State(RMSPROP, float)
+MAKE_PreconditionOptimizer32bit1State(ADAGRAD, half)
+MAKE_PreconditionOptimizer32bit1State(ADAGRAD, float)
 
 #define MAKE_Optimizer32bit1State(oname, gtype) \
 template __global__ void kOptimizer32bit1State<gtype, oname>(gtype* g, gtype* p, float* state1, float *unorm, const float max_unorm, const float param_norm, \
-    const float beta1, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const int n); \
+    const float beta1, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const bool skip_zeros, const int n); \
 
 MAKE_Optimizer32bit1State(MOMENTUM, half)
 MAKE_Optimizer32bit1State(MOMENTUM, float)
 MAKE_Optimizer32bit1State(RMSPROP, half)
 MAKE_Optimizer32bit1State(RMSPROP, float)
+MAKE_Optimizer32bit1State(ADAGRAD, half)
+MAKE_Optimizer32bit1State(ADAGRAD, float)
 
 #define MAKE_PreconditionOptimizer32bit2State(oname, gtype) \
 template __global__ void kPreconditionOptimizer32bit2State<gtype, oname, 4096, 8>(gtype* g, gtype* p,  \
@@ -1740,9 +1781,9 @@ MAKE_PreconditionOptimizer32bit2State(ADAM, half)
 MAKE_PreconditionOptimizer32bit2State(ADAM, float)
 
 template __global__ void kOptimizer32bit2State<half, ADAM>(half* g, half* p, float* state1, float* state2, float *unorm, const float max_unorm, const float param_norm,
-    const float beta1, const float beta2, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const int n);
+    const float beta1, const float beta2, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const bool skip_zeros, const int n);
 template __global__ void kOptimizer32bit2State<float, ADAM>(float* g, float* p, float* state1, float* state2, float *unorm, const float max_unorm, const float param_norm,
-    const float beta1, const float beta2, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const int n);
+    const float beta1, const float beta2, const float eps, const float weight_decay,const int step, const float lr, const float gnorm_scale, const bool skip_zeros, const int n);
 
 #define MAKE_PreconditionStatic8bit1State(oname, gtype) \
 template __global__ void kPreconditionOptimizerStatic8bit1State<gtype, oname>(gtype* p, gtype* __restrict__ const g, unsigned char*__restrict__  const state1,  \
@@ -1825,7 +1866,7 @@ template __global__ void kOptimizerStatic8bit2StateBlockwise<gtype, oname, block
                 float* __restrict__ const quantiles1, float* __restrict__ const quantiles2, \
                 float* absmax1, float* absmax2,  \
                 float weight_decay, \
-                const float gnorm_scale, const int n); \
+                const float gnorm_scale, const bool skip_zeros, const int n); \
 
 MAKE_OptimizerStatic8bit2StateBlockwise(ADAM, float, 2048, 8)
 MAKE_OptimizerStatic8bit2StateBlockwise(ADAM, half, 2048, 8)
@@ -1838,9 +1879,11 @@ template __global__ void kOptimizerStatic8bit1StateBlockwise<gtype, oname, block
                 float* __restrict__ const quantiles1, \
                 float* absmax1, \
                 float weight_decay, \
-                const float gnorm_scale, const int n); \
+                const float gnorm_scale, const bool skip_zeros, const int n); \
 
 MAKE_OptimizerStatic8bit1StateBlockwise(MOMENTUM, float, 2048, 8)
 MAKE_OptimizerStatic8bit1StateBlockwise(MOMENTUM, half, 2048, 8)
 MAKE_OptimizerStatic8bit1StateBlockwise(RMSPROP, float, 2048, 8)
 MAKE_OptimizerStatic8bit1StateBlockwise(RMSPROP, half, 2048, 8)
+MAKE_OptimizerStatic8bit1StateBlockwise(ADAGRAD, float, 2048, 8)
+MAKE_OptimizerStatic8bit1StateBlockwise(ADAGRAD, half, 2048, 8)
